@@ -1,7 +1,26 @@
 import { createHash } from "crypto";
 import OpenAI from "openai";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openaiClient: OpenAI | null = null;
+
+/**
+ * Create the OpenAI client on first use rather than at module load time.
+ * Instantiating it at import time throws when OPENAI_API_KEY is absent, which
+ * breaks `next build` (Next.js imports every route while collecting page data)
+ * even though the key is only needed once an embedding is actually requested.
+ */
+function getOpenAI(): OpenAI {
+  if (!openaiClient) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "OPENAI_API_KEY is not set — embeddings are unavailable. Set it in Admin > OpenAI or in the environment.",
+      );
+    }
+    openaiClient = new OpenAI({ apiKey });
+  }
+  return openaiClient;
+}
 
 /**
  * Concatenate non-null text fields into a single embedding string.
@@ -25,7 +44,7 @@ export function computeContentHash(text: string): string {
  * Returns a float array of 1536 dimensions.
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
+  const response = await getOpenAI().embeddings.create({
     model: "text-embedding-3-small",
     input: text,
   });
