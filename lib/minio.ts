@@ -1,10 +1,31 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-if (!process.env.MINIO_ENDPOINT) throw new Error("MINIO_ENDPOINT is not defined");
-if (!process.env.MINIO_ACCESS_KEY) throw new Error("MINIO_ACCESS_KEY is not defined");
-if (!process.env.MINIO_SECRET_KEY) throw new Error("MINIO_SECRET_KEY is not defined");
-if (!process.env.MINIO_BUCKET) throw new Error("MINIO_BUCKET is not defined");
+/**
+ * Object storage settings are validated lazily, not at module load.
+ * `next build` imports every route module while collecting page data, and
+ * build machines deliberately do not hold runtime secrets (see the build-time
+ * placeholders in the Dockerfile), so throwing here broke production builds.
+ * A misconfigured deployment still fails loudly — on first real use.
+ */
+const REQUIRED_STORAGE_ENV = [
+  "MINIO_ENDPOINT",
+  "MINIO_ACCESS_KEY",
+  "MINIO_SECRET_KEY",
+  "MINIO_BUCKET",
+] as const;
+
+export function missingStorageEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return REQUIRED_STORAGE_ENV.filter((name) => !env[name]);
+}
+
+/** Throws a clear error when storage is unconfigured. Call before touching the bucket. */
+export function assertStorageConfigured(): void {
+  const missing = missingStorageEnv();
+  if (missing.length > 0) {
+    throw new Error(`Object storage is not configured: ${missing.join(", ")} is not defined`);
+  }
+}
 
 /**
  * URL browsers use to reach the bucket. In Docker MINIO_ENDPOINT is an
@@ -21,13 +42,15 @@ export function minioPublicEndpoint(env: NodeJS.ProcessEnv = process.env): strin
   ).replace(/\/+$/, "");
 }
 
-function createClient(endpoint: string) {
+function createClient(endpoint: string | undefined) {
   return new S3Client({
-    endpoint,
+    // Placeholders keep construction side-effect free when the environment is
+    // not configured yet (e.g. during `next build`); real values are used at runtime.
+    endpoint: endpoint ?? "http://localhost:9000",
     region: "us-east-1", // MinIO requires a region value; actual value doesn't matter
     credentials: {
-      accessKeyId: process.env.MINIO_ACCESS_KEY!,
-      secretAccessKey: process.env.MINIO_SECRET_KEY!,
+      accessKeyId: process.env.MINIO_ACCESS_KEY ?? "",
+      secretAccessKey: process.env.MINIO_SECRET_KEY ?? "",
     },
     forcePathStyle: true, // REQUIRED for MinIO — without this, SDK uses virtual-hosted-style which breaks
   });
@@ -50,6 +73,7 @@ export const minioPresignClient =
 
 /** Short-lived GET link for a private object. Hand it out only after an access check. */
 export function presignGet(key: string, expiresIn = 300): Promise<string> {
+  assertStorageConfigured();
   return getSignedUrl(
     minioPresignClient,
     new GetObjectCommand({ Bucket: MINIO_BUCKET, Key: key }),
